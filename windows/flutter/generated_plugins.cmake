@@ -3,7 +3,14 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  audioplayers_windows
+  emoji_picker_flutter
   file_selector_windows
+  firebase_core
+  flutter_webrtc
+  permission_handler_windows
+  record_windows
+  url_launcher_windows
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST

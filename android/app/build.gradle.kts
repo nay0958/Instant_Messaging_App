@@ -5,15 +5,25 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// Conditionally apply Google Services plugin only if google-services.json exists
+val googleServicesFile = file("google-services.json")
+if (googleServicesFile.exists()) {
+    apply(plugin = "com.google.gms.google-services")
+    println("✅ Google Services plugin applied (google-services.json found)")
+} else {
+    println("⚠️ Google Services plugin skipped (google-services.json not found)")
+    println("💡 To enable Firebase: Add google-services.json to android/app/")
+}
+
 android {
-    namespace = "com.example.study1"
+    namespace = "com.study.messaging"
 
     // Flutter template variables are fine; just ensure compile/target are recent.
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
     defaultConfig {
-        applicationId = "com.example.study1"
+        applicationId = "com.study.messaging"
 
         // ⚠️ Make sure minSdk >= 21 for flutter_local_notifications
         // If flutter.minSdkVersion < 21, override it explicitly:

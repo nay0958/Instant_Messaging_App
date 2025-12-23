@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1204334200",
+    "project_id": "messaging-9db2b",
+    "storage_bucket": "messaging-9db2b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1204334200:android:ba3b188d8a72cc3c3e078d",
+        "android_client_info": {
+          "package_name": "com.study.messaging"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBEYspNMZzXHfQl32nEaFo5xphEjlPFJHw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

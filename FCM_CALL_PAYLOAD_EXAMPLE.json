@@ -1,0 +1,93 @@
+{
+  "description": "FCM Data-Only Message Format for CallKit Incoming Calls",
+  "important": "DO NOT include a 'notification' key - this must be DATA-ONLY",
+  
+  "correct_format": {
+    "data": {
+      "type": "video",
+      "callId": "unique-call-id-123",
+      "nameCaller": "John Doe",
+      "avatar": "https://example.com/avatar.jpg",
+      "callerId": "user-id-456",
+      "from": "user-id-456",
+      "to": "user-id-789",
+      "isVideoCall": "true",
+      "kind": "video",
+      "sdp": "{\"type\":\"offer\",\"sdp\":\"...\"}"
+    },
+    "token": "fcm-device-token",
+    "android": {
+      "priority": "high"
+    },
+    "apns": {
+      "headers": {
+        "apns-priority": "10"
+      },
+      "payload": {
+        "aps": {
+          "contentAvailable": true,
+          "sound": "default",
+          "badge": 1
+        }
+      }
+    }
+  },
+
+  "incorrect_format_do_not_use": {
+    "notification": {
+      "title": "Incoming Call",
+      "body": "John Doe is calling you"
+    },
+    "data": {
+      "type": "video",
+      "callId": "123"
+    },
+    "token": "fcm-device-token"
+  },
+
+  "note": "When 'notification' key is present, Android shows system notification and may not call background handler properly. For CallKit, use DATA-ONLY messages.",
+
+  "required_data_keys": {
+    "type": "Either 'voice' or 'video' - REQUIRED for call detection",
+    "callId": "Unique call identifier - REQUIRED",
+    "nameCaller": "Caller's display name - REQUIRED for CallKit banner",
+    "avatar": "Caller's avatar URL (optional but recommended)",
+    "callerId": "Caller's user ID - REQUIRED"
+  },
+
+  "example_using_firebase_admin_sdk": {
+    "nodejs_code": `
+const message = {
+  data: {
+    type: 'video',
+    callId: 'call-123',
+    nameCaller: 'John Doe',
+    avatar: 'https://example.com/avatar.jpg',
+    callerId: 'user-456',
+    from: 'user-456',
+    to: 'user-789',
+    isVideoCall: 'true',
+    kind: 'video'
+  },
+  token: userFcmToken,
+  android: {
+    priority: 'high'
+  },
+  apns: {
+    headers: {
+      'apns-priority': '10'
+    },
+    payload: {
+      aps: {
+        contentAvailable: true,
+        sound: 'default',
+        badge: 1
+      }
+    }
+  }
+};
+
+await admin.messaging().send(message);
+    `
+  }
+}

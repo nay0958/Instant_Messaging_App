@@ -62,8 +62,9 @@ class Noti {
     required String body,
     Map<String, String>? payload,
   }) async {
-    if (messageId.isEmpty)
+    if (messageId.isEmpty) {
       return show(title: title, body: body, payload: payload);
+    }
     if (_seenIds.contains(messageId)) return;
     _seenIds.add(messageId);
     await show(title: title, body: body, payload: payload);
