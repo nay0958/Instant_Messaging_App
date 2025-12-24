@@ -62,16 +62,21 @@ class MessageProvider {
 
   /// Convert FCM RemoteMessage to socket message format
   /// Note: FCM uses 'senderId' and 'recipientId' instead of 'from' and 'to' (reserved keys)
+  /// CRITICAL: Ensure messageId is consistent across FCM and socket handlers
   static Map<String, dynamic> _convertFCMToSocketMessage(RemoteMessage message) {
     final data = message.data;
     
+    // CRITICAL: Use consistent messageId format - prefer messageId, then _id, then id
+    // This ensures FCM handler and socket handler use the same ID for duplicate detection
+    final messageId = data['messageId']?.toString().trim() ?? 
+                     data['_id']?.toString().trim() ?? 
+                     data['id']?.toString().trim() ?? 
+                     DateTime.now().millisecondsSinceEpoch.toString();
+    
     return {
-      '_id': data['messageId']?.toString() ?? 
-             data['_id']?.toString() ?? 
-             DateTime.now().millisecondsSinceEpoch.toString(),
-      'id': data['messageId']?.toString() ?? 
-            data['id']?.toString() ?? 
-            DateTime.now().millisecondsSinceEpoch.toString(),
+      '_id': messageId, // Use same ID for both _id and id fields
+      'id': messageId,
+      'messageId': messageId, // Also include messageId field for consistency
       // FCM uses 'senderId' and 'recipientId' instead of 'from' and 'to' (reserved keys)
       'from': data['senderId']?.toString() ?? data['from']?.toString() ?? '',
       'to': data['recipientId']?.toString() ?? data['to']?.toString() ?? '',

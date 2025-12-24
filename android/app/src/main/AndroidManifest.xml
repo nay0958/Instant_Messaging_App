@@ -29,7 +29,9 @@
         android:requestLegacyExternalStorage="true"
         android:supportsRtl="true"
         android:allowBackup="true"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:foregroundServiceType="phoneCall"
+        android:enableOnBackInvokedCallback="true">
         
         <activity
             android:name=".MainActivity"

@@ -23,6 +23,7 @@ import 'widgets/avatar_with_status.dart';
 import 'package:flutter_contacts/flutter_contacts.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
 import 'background_service.dart';
+import 'firebase_messaging_handler.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -462,8 +463,39 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 // Show file name in notification
                 notificationBody = fileName.isNotEmpty ? fileName : 'File';
               }
+              
+              // Get message ID - try multiple formats to match FCM handler
+              // CRITICAL: Normalize messageId (trim) to ensure consistent matching
+              final rawMessageId = (m['_id'] ?? m['id'] ?? m['messageId'] ?? '').toString();
+              final messageId = rawMessageId.trim();
+              
+              // CRITICAL: Check if message was already processed by FCM handler
+              // This prevents duplicate notifications when both FCM and socket receive the same message
+              // FCM handler marks message as processed BEFORE emitting to socket, so this check will catch it
+              if (messageId.isNotEmpty && FirebaseMessagingHandler.isMessageProcessed(messageId)) {
+                debugPrint('⚠️ Message $messageId already processed by FCM - skipping duplicate notification');
+                // Still update unread count even if notification was already shown
+                if (fromId != null && fromId.isNotEmpty) {
+                  _lastFromByPeer[fromId] = 'them';
+                  _unreadByPeer[fromId] = (_unreadByPeer[fromId] ?? 0) + 1;
+                }
+                return; // Skip showing notification
+              }
+              
+              // Mark message as processed BEFORE showing notification (in case it wasn't marked by FCM)
+              // This handles the case where message comes directly via socket (not from FCM)
+              if (messageId.isNotEmpty) {
+                final wasNew = FirebaseMessagingHandler.markMessageProcessed(messageId);
+                if (wasNew) {
+                  debugPrint('✅ Marked message $messageId as processed (socket handler)');
+                } else {
+                  debugPrint('⚠️ Message $messageId was already processed - this should not happen');
+                  return; // Safety check - if already processed, skip
+                }
+              }
+              
               await Noti.showIfNew(
-                messageId: (m['_id'] ?? '').toString(),
+                messageId: messageId,
                 title: 'New message',
                 body: notificationBody,
                 payload: {'fromId': fromId ?? ''},

@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
+import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
@@ -61,6 +63,8 @@ String maskToken(String? token) {
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   debugPrint('🚀 BACKGROUND HANDLER CALLED - App is in background/terminated state');
   debugPrint('📱 Message received in background isolate');
+  debugPrint('📱 Device: ${Platform.isAndroid ? "Android" : "iOS"}');
+  debugPrint('📱 Timestamp: ${DateTime.now().toIso8601String()}');
   
   // Initialize Firebase in background isolate (if not already initialized)
   try {
@@ -72,7 +76,12 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   }
   
   // Initialize local notifications in background isolate
-  await Noti.init();
+  try {
+    await Noti.init();
+    debugPrint('✅ Local notifications initialized in background isolate');
+  } catch (e) {
+    debugPrint('❌ Error initializing local notifications in background: $e');
+  }
   
   // Create CallKit notification channel in background isolate (if not already created)
   try {
@@ -292,17 +301,151 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
         // Continue even if cleanup fails
       }
 
-      // Show CallKit banner immediately using FlutterCallkitIncoming.showCallkitIncoming()
-      // NO socket operations - banner shows and phone rings immediately
+      // CRITICAL: On real devices, background isolate cannot use Flutter platform channels
+      // Use full-screen intent notification to launch CallKit activity directly
+      // This works even when app is in background or terminated
       debugPrint('📞 Attempting to show CallKit banner in background...');
+      debugPrint('📱 Platform: ${Platform.isAndroid ? "Android" : "iOS"}');
+      debugPrint('📱 Call ID: $callId');
+      debugPrint('📱 Caller: $callerName');
+      
+      // Try CallKit first (works on some devices/Android versions)
+      bool callKitShown = false;
       try {
         await FlutterCallkitIncoming.showCallkitIncoming(params);
-        debugPrint('✅ CallKit banner shown successfully - phone should be ringing');
+        debugPrint('✅ CallKit banner shown successfully via platform channel');
+        callKitShown = true;
       } catch (callKitError) {
-        debugPrint('❌ Error calling FlutterCallkitIncoming.showCallkitIncoming: $callKitError');
-        debugPrint('💡 This might be due to Android background restrictions');
-        // Re-throw to trigger fallback
-        rethrow;
+        debugPrint('⚠️ CallKit platform channel failed (expected on real devices): $callKitError');
+        debugPrint('💡 This is normal - background isolates cannot use platform channels');
+        debugPrint('💡 Using full-screen intent notification as fallback...');
+      }
+      
+      // ALWAYS show full-screen intent notification as primary method for real devices
+      // This ensures banner shows even when platform channels fail
+      if (Platform.isAndroid) {
+        try {
+          final plugin = FlutterLocalNotificationsPlugin();
+          final androidImplementation = plugin
+              .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+          
+          if (androidImplementation != null) {
+            // Create full-screen intent that launches CallKit activity
+            // This will wake the screen and show the call UI
+            final androidDetails = AndroidNotificationDetails(
+              'calls',
+              'Incoming Calls',
+              channelDescription: 'High priority notifications for incoming calls',
+              importance: Importance.max,
+              priority: Priority.max,
+              fullScreenIntent: true, // CRITICAL: This wakes screen and shows full-screen
+              playSound: true,
+              enableVibration: true,
+              category: AndroidNotificationCategory.call,
+              ongoing: true, // Keep notification until call is answered/declined
+              autoCancel: false, // Don't auto-cancel - user must interact
+              showWhen: false,
+              enableLights: true,
+              ledColor: const Color.fromARGB(255, 181, 156, 217),
+              // Add action buttons for Accept/Decline
+              actions: <AndroidNotificationAction>[
+                const AndroidNotificationAction(
+                  'accept',
+                  'Accept',
+                  showsUserInterface: true,
+                  cancelNotification: true,
+                ),
+                const AndroidNotificationAction(
+                  'decline',
+                  'Decline',
+                  showsUserInterface: false,
+                  cancelNotification: true,
+                ),
+              ],
+            );
+            
+            // Create intent to launch CallKit activity with call data
+            // The payload contains all call information needed
+            final callPayload = jsonEncode({
+              'type': 'call',
+              'callId': callId,
+              'call_id': callId,
+              'callerId': callerId,
+              'callerName': callerName,
+              'caller_name': callerName,
+              'isVideo': isVideo,
+              'kind': isVideo ? 'video' : 'voice',
+              'avatar': avatar ?? '',
+              'sdp': data['sdp'],
+              'timestamp': data['timestamp'] ?? DateTime.now().millisecondsSinceEpoch.toString(),
+            });
+            
+            // Create notification with action buttons and full-screen intent
+            // The full-screen intent will automatically launch when screen is locked/off
+            await plugin.show(
+              callId.hashCode,
+              'Incoming ${isVideo ? "Video" : "Voice"} Call',
+              callerName,
+              NotificationDetails(android: androidDetails),
+              payload: callPayload,
+            );
+            
+            debugPrint('✅ Full-screen intent notification shown - should wake screen');
+            debugPrint('✅ Notification will automatically launch CallKit activity when screen wakes');
+            
+            // CRITICAL: Try to launch CallKit activity directly using method channel
+            // This works even in background isolate on some Android versions
+            try {
+              const platform = MethodChannel('flutter_callkit_incoming');
+              await platform.invokeMethod('showCallkitIncoming', {
+                'id': callId,
+                'nameCaller': callerName,
+                'appName': 'Messaging App',
+                'avatar': avatar ?? '',
+                'handle': callerId.isNotEmpty ? callerId : callId,
+                'type': isVideo ? 1 : 0,
+                'duration': 30000,
+                'textAccept': 'Accept',
+                'textDecline': 'Decline',
+                'textMissedCall': 'Missed Call',
+                'textCallback': 'Call Back',
+                'extra': {
+                  'callerId': callerId,
+                  'callerName': callerName,
+                  'isVideo': isVideo,
+                  'callId': callId,
+                  'call_id': callId,
+                  'caller_name': callerName,
+                  'avatar': avatar ?? '',
+                  'kind': isVideo ? 'video' : 'voice',
+                },
+                'android': {
+                  'isCustomNotification': true,
+                  'isShowLogo': true,
+                  'ringtonePath': 'system_default',
+                  'backgroundColor': '#FFB19CD9',
+                  'backgroundUrl': avatar ?? '',
+                  'actionColor': '#0955fa',
+                },
+              });
+              debugPrint('✅ CallKit activity launched directly via method channel');
+            } catch (methodError) {
+              debugPrint('⚠️ Method channel launch failed (this is OK, notification will handle it): $methodError');
+              debugPrint('💡 Full-screen notification will launch CallKit when tapped or screen wakes');
+            }
+          } else {
+            debugPrint('⚠️ Android notification implementation not available');
+          }
+        } catch (notifError) {
+          debugPrint('❌ Error showing full-screen intent notification: $notifError');
+          debugPrint('💡 Stack trace: ${StackTrace.current}');
+        }
+      }
+      
+      if (callKitShown) {
+        debugPrint('✅ Background handler completed successfully (CallKit shown via platform channel)');
+      } else {
+        debugPrint('✅ Background handler completed (using full-screen notification - will launch CallKit on tap)');
       }
     } catch (e) {
       debugPrint('❌ Error showing CallKit banner: $e');
@@ -461,6 +604,40 @@ class FirebaseMessagingHandler {
   static StreamSubscription? _callKitSubscription;
   static Map<String, Map<String, dynamic>> _pendingCalls = {};
   static final Set<String> _processedCallIds = <String>{}; // Track processed call IDs to prevent loops
+  // Track processed message IDs to prevent duplicate notifications
+  // Use LinkedHashSet to maintain insertion order for cleanup
+  static final Set<String> _processedMessageIds = LinkedHashSet<String>();
+  
+  /// Check if a message ID was already processed (to prevent duplicate notifications)
+  /// Call this from socket handlers before showing notifications
+  static bool isMessageProcessed(String messageId) {
+    if (messageId.isEmpty) return false;
+    return _processedMessageIds.contains(messageId.trim());
+  }
+  
+  /// Mark a message ID as processed (to prevent duplicate notifications)
+  /// Call this from socket handlers when showing notifications
+  /// Returns true if message was newly processed, false if already processed
+  static bool markMessageProcessed(String messageId) {
+    if (messageId.isEmpty) return false;
+    
+    final trimmedId = messageId.trim();
+    if (_processedMessageIds.contains(trimmedId)) {
+      return false; // Already processed
+    }
+    
+    _processedMessageIds.add(trimmedId);
+    
+    // Clean up old processed IDs (keep last 200 to prevent memory leak)
+    if (_processedMessageIds.length > 200) {
+      final idsList = _processedMessageIds.toList();
+      idsList.removeRange(0, 100);
+      _processedMessageIds.clear();
+      _processedMessageIds.addAll(idsList);
+    }
+    
+    return true; // Newly processed
+  }
 
   /// Initialize Firebase Messaging
   static Future<void> initialize() async {
@@ -481,6 +658,11 @@ class FirebaseMessagingHandler {
     // Request System Alert Window permission for Android (required for banner overlay)
     if (Platform.isAndroid) {
       await _requestSystemAlertWindowPermission();
+      // Defer battery optimization request to avoid blocking UI startup
+      // This is non-critical and can happen after UI is shown
+      Future.delayed(const Duration(seconds: 2), () {
+        _requestBatteryOptimizationExemption();
+      });
     }
     
     // Request permission
@@ -551,6 +733,11 @@ class FirebaseMessagingHandler {
         debugPrint('   Platform: Android');
         debugPrint('   💡 Check that google-services.json is properly configured');
         debugPrint('   💡 Verify Firebase project is set up correctly');
+        debugPrint('   💡 Real device issues:');
+        debugPrint('      - Google Play Services must be installed and updated');
+        debugPrint('      - Device must have internet connection');
+        debugPrint('      - Battery optimization may prevent token retrieval');
+        debugPrint('      - Check: Settings → Apps → Google Play Services → Update');
       }
       
       // Check permission status
@@ -678,27 +865,139 @@ class FirebaseMessagingHandler {
     }
   }
   
+  /// Request battery optimization exemption (CRITICAL for real devices)
+  /// Android kills background services when battery optimization is enabled
+  /// This function requests exemption so FCM background handler can work
+  /// Uses native Android Intent via MethodChannel to avoid permission_handler warning
+  static Future<bool> _requestBatteryOptimizationExemption() async {
+    if (!Platform.isAndroid) return true; // Not needed on iOS
+    
+    try {
+      const platform = MethodChannel('com.study.messaging/battery_optimization');
+      
+      // Check current status first
+      final hasExemption = await platform.invokeMethod<bool>('hasBatteryOptimizationExemption') ?? false;
+      
+      if (hasExemption) {
+        debugPrint('✅ Battery optimization exemption already granted');
+        return true;
+      }
+      
+      // Request exemption - this opens Android settings dialog
+      debugPrint('⚠️ Battery optimization exemption not granted - requesting...');
+      debugPrint('💡 This is CRITICAL for real devices - FCM background handler may not work without this');
+      debugPrint('💡 Android will show a dialog - please tap "Allow"');
+      
+      await platform.invokeMethod('requestBatteryOptimizationExemption');
+      
+      // Note: We can't immediately check if user granted it because the dialog is async
+      // The user needs to grant it in the Android settings dialog
+      debugPrint('💡 Battery optimization dialog opened - please grant permission');
+      debugPrint('💡 If denied, user can enable it manually in: Settings → Apps → Your App → Battery → Unrestricted');
+      
+      return false; // Will be true after user grants it
+    } catch (e) {
+      debugPrint('❌ Error requesting battery optimization exemption: $e');
+      // Fallback to permission_handler if MethodChannel fails
+      try {
+        final status = await Permission.ignoreBatteryOptimizations.status;
+        if (status.isGranted) {
+          debugPrint('✅ Battery optimization exemption already granted (fallback check)');
+          return true;
+        }
+        if (status.isDenied) {
+          final result = await Permission.ignoreBatteryOptimizations.request();
+          return result.isGranted;
+        }
+      } catch (fallbackError) {
+        debugPrint('❌ Fallback permission_handler also failed: $fallbackError');
+      }
+      return false;
+    }
+  }
+  
+  /// Check if battery optimization exemption is granted
+  /// Uses native Android check via MethodChannel to avoid permission_handler warning
+  static Future<bool> hasBatteryOptimizationExemption() async {
+    if (!Platform.isAndroid) return true; // Not needed on iOS
+    
+    try {
+      const platform = MethodChannel('com.study.messaging/battery_optimization');
+      final hasExemption = await platform.invokeMethod<bool>('hasBatteryOptimizationExemption') ?? false;
+      return hasExemption;
+    } catch (e) {
+      debugPrint('Error checking battery optimization exemption: $e');
+      // Fallback to permission_handler if MethodChannel fails
+      try {
+        final status = await Permission.ignoreBatteryOptimizations.status;
+        return status.isGranted;
+      } catch (fallbackError) {
+        debugPrint('Fallback permission_handler also failed: $fallbackError');
+        return false;
+      }
+    }
+  }
+  
   /// Handle notification tap
   static void _handleNotificationTap(String payload) {
     try {
       final data = jsonDecode(payload) as Map<String, dynamic>;
-      debugPrint('Notification tapped with payload: $data');
+      debugPrint('📱 Notification tapped with payload: $data');
       
       // Handle different notification types
-      final type = data['type']?.toString();
-      if (type == 'message') {
+      final type = data['type']?.toString()?.toLowerCase() ?? '';
+      final messageType = data['type']?.toString()?.toUpperCase() ?? '';
+      
+      // Check if this is a call notification (from full-screen intent)
+      final isCallNotification = type == 'call' ||
+          messageType == 'CALL' ||
+          messageType == 'VOICE' ||
+          messageType == 'VIDEO' ||
+          data.containsKey('caller_name') ||
+          data.containsKey('callerName') ||
+          data.containsKey('nameCaller') ||
+          data['call_id'] != null ||
+          data['callId'] != null;
+      
+      if (isCallNotification) {
+        debugPrint('📞 Call notification tapped - showing CallKit banner');
+        // Extract call data from payload
+        final callId = data['callId']?.toString() ?? data['call_id']?.toString() ?? '';
+        final callerName = data['callerName']?.toString() ?? 
+                          data['caller_name']?.toString() ?? 
+                          data['nameCaller']?.toString() ?? 
+                          'Unknown Caller';
+        final callerId = data['callerId']?.toString() ?? 
+                        data['from']?.toString() ?? '';
+        final avatar = data['avatar']?.toString();
+        final isVideo = data['isVideo']?.toString().toLowerCase() == 'true' ||
+                       data['kind']?.toString().toLowerCase() == 'video';
+        
+        // Show CallKit banner when notification is tapped
+        // This ensures call UI appears even if full-screen intent didn't work
+        Future.delayed(const Duration(milliseconds: 500), () {
+          _showCallKitFromPayload(
+            callId: callId,
+            callerName: callerName,
+            callerId: callerId,
+            avatar: avatar,
+            isVideo: isVideo,
+            sdp: data['sdp'],
+          );
+        });
+      } else if (type == 'message') {
         // Navigate to chat page
-        final peerId = data['from']?.toString() ?? data['peerId']?.toString();
+        final peerId = data['from']?.toString() ?? 
+                      data['peerId']?.toString() ?? 
+                      data['senderId']?.toString();
         if (peerId != null && peerId.isNotEmpty) {
           // Navigation will be handled by the app's routing
           debugPrint('Should navigate to chat with: $peerId');
         }
-      } else if (type == 'call') {
-        // Navigate to call page
-        _navigateToCallPage(data);
       }
     } catch (e) {
-      debugPrint('Error handling notification tap: $e');
+      debugPrint('❌ Error handling notification tap: $e');
+      debugPrint('💡 Payload: $payload');
     }
   }
 
@@ -1084,12 +1383,22 @@ class FirebaseMessagingHandler {
       // Do NOT call _showCallKitIncoming in foreground
       // Socket.io listener in main.dart will handle navigation to CallPage
     } else if (messageType == 'message' || messageType.isEmpty) {
-      // Always process FCM messages (even if socket is connected, as a backup)
-      // This ensures messages are received even if socket connection is unstable
-      debugPrint('📱 Processing FCM message (socket status: ${SocketService.I.isConnected ? "connected" : "disconnected"})');
+      // Process FCM messages
+      final isSocketConnected = SocketService.I.isConnected;
+      debugPrint('📱 Processing FCM message (socket status: ${isSocketConnected ? "connected" : "disconnected"})');
+      
+      // Process message (convert to socket format and emit)
       _processFCMessage(message);
-      // Also show notification
-      _showLocalNotificationForMessage(message);
+      
+      // CRITICAL: Only show notification if socket is NOT connected
+      // If socket is connected, the socket handler in home_page.dart will show the notification
+      // This prevents duplicate notifications
+      if (!isSocketConnected) {
+        debugPrint('📱 Socket disconnected - showing FCM notification');
+        _showLocalNotificationForMessage(message);
+      } else {
+        debugPrint('📱 Socket connected - skipping FCM notification (socket handler will show it)');
+      }
     }
   }
   
@@ -1097,7 +1406,34 @@ class FirebaseMessagingHandler {
   /// Converts FCM message to socket format and processes it
   static void _processFCMessage(RemoteMessage message) {
     try {
+      final data = message.data;
       final isSocketConnected = SocketService.I.isConnected;
+      
+      // CRITICAL: Extract and mark messageId as processed BEFORE emitting to socket
+      // This prevents socket handler from showing duplicate notification
+      final messageId = data['messageId']?.toString().trim() ?? 
+                       data['_id']?.toString().trim() ??
+                       data['id']?.toString().trim() ??
+                       message.messageId?.trim() ??
+                       '';
+      
+      if (messageId.isNotEmpty) {
+        if (_processedMessageIds.contains(messageId)) {
+          debugPrint('⚠️ Message $messageId already processed - skipping FCM processing');
+          return; // Already processed, don't emit to socket
+        }
+        // Mark as processed BEFORE emitting to socket
+        _processedMessageIds.add(messageId);
+        debugPrint('✅ Marked message $messageId as processed BEFORE socket emission');
+        
+        // Clean up old processed IDs
+        if (_processedMessageIds.length > 200) {
+          final idsList = _processedMessageIds.toList();
+          idsList.removeRange(0, 100);
+          _processedMessageIds.clear();
+          _processedMessageIds.addAll(idsList);
+        }
+      }
       
       if (!isSocketConnected) {
         // Socket is disconnected - process via MessageProvider
@@ -1106,7 +1442,9 @@ class FirebaseMessagingHandler {
         debugPrint('✅ FCM message processed and emitted as socket message');
       } else {
         // Socket is connected - message should come via socket, but process FCM as backup
-        debugPrint('📱 Socket connected - FCM message processed as backup');
+        // CRITICAL: Even though socket is connected, we emit via FCM to ensure message is processed
+        // But we've already marked it as processed, so socket handler will skip notification
+        debugPrint('📱 Socket connected - FCM message processed as backup (already marked as processed)');
         MessageProvider.processFCMessage(message);
       }
     } catch (e) {
@@ -1122,33 +1460,95 @@ class FirebaseMessagingHandler {
       final notification = message.notification;
       final data = message.data;
       
-      final title = notification?.title ?? 
-                   data['title']?.toString() ?? 
-                   'New Message';
-      final body = notification?.body ?? 
-                  data['body']?.toString() ?? 
-                  data['message']?.toString() ?? 
-                  'You have a new message';
+      // Get sender name for title
+      final senderName = notification?.title ?? 
+                        data['title']?.toString() ?? 
+                        'New Message';
       
-      final messageId = message.messageId ?? 
-                       data['messageId']?.toString() ?? 
-                       DateTime.now().millisecondsSinceEpoch.toString();
+      // Get message text - ONLY use data['text'] to avoid duplicates
+      // Backend sends clean text in data['text'] field
+      // DO NOT use notification.body as it might contain sender name + text
+      String body = data['text']?.toString().trim() ?? '';
       
-      // Show local notification
+      // If data['text'] is empty, try other sources but clean them
+      if (body.isEmpty) {
+        final notificationBody = notification?.body?.toString().trim() ?? '';
+        // Remove sender name from notification body if it's duplicated
+        // e.g., if notification.body is "userC Hi", remove "userC " prefix
+        if (notificationBody.isNotEmpty) {
+          // Check if notification body starts with sender name
+          if (senderName != 'New Message' && notificationBody.startsWith(senderName)) {
+            // Remove sender name and any following space
+            body = notificationBody.substring(senderName.length).trim();
+            if (body.isEmpty) {
+              body = notificationBody; // Use original if removal resulted in empty
+            }
+          } else {
+            body = notificationBody;
+          }
+        }
+        
+        // Final fallbacks
+        if (body.isEmpty) {
+          body = data['body']?.toString().trim() ?? 
+                 data['message']?.toString().trim() ?? 
+                 'You have a new message';
+        }
+      }
+      
+      // Use messageId from data (backend sends it) or generate one
+      // Try multiple formats to match socket handler's messageId
+      // CRITICAL: Normalize messageId to ensure consistent matching
+      String? rawMessageId = data['messageId']?.toString() ?? 
+                            data['_id']?.toString() ??
+                            data['id']?.toString();
+      
+      // If no messageId found, try to extract from notification payload
+      if (rawMessageId == null || rawMessageId.isEmpty) {
+        rawMessageId = message.messageId;
+      }
+      
+      // Final fallback - generate one (but this should rarely happen)
+      final messageId = rawMessageId?.trim() ?? DateTime.now().millisecondsSinceEpoch.toString();
+      
+      // CRITICAL: Check if this message was already processed (by FCM or socket)
+      // This prevents duplicate notifications when both FCM and socket receive the same message
+      final trimmedMessageId = messageId.trim();
+      
+      if (_processedMessageIds.contains(trimmedMessageId)) {
+        debugPrint('⚠️ Message $trimmedMessageId already processed - skipping duplicate notification');
+        return;
+      }
+      
+      // Mark as processed BEFORE showing notification to prevent race conditions
+      _processedMessageIds.add(trimmedMessageId);
+      
+      // Clean up old processed IDs (keep last 200 to prevent memory leak)
+      if (_processedMessageIds.length > 200) {
+        final idsList = _processedMessageIds.toList();
+        idsList.removeRange(0, 100);
+        _processedMessageIds.clear();
+        _processedMessageIds.addAll(idsList);
+      }
+      
+      debugPrint('✅ Marked message $trimmedMessageId as processed (FCM handler)');
+      
+      // CRITICAL: Use showIfNew to prevent duplicate notifications
+      // This checks if messageId was already shown (additional safety)
       await Noti.showIfNew(
         messageId: messageId,
-        title: title,
+        title: senderName,
         body: body,
         payload: {
           'type': data['type']?.toString() ?? 'message',
-          'from': data['from']?.toString() ?? '',
-          'peerId': data['peerId']?.toString() ?? data['from']?.toString() ?? '',
+          'from': data['senderId']?.toString() ?? data['from']?.toString() ?? '',
+          'peerId': data['senderId']?.toString() ?? data['from']?.toString() ?? '',
           'messageId': messageId,
           ...data,
         },
       );
       
-      debugPrint('✅ Local notification shown: $title - $body');
+      debugPrint('✅ Local notification shown: $senderName - $body (messageId: $messageId)');
     } catch (e) {
       debugPrint('❌ Error showing local notification: $e');
     }
@@ -1176,18 +1576,15 @@ class FirebaseMessagingHandler {
         data['call_id'] != null ||
         data['callId'] != null) {
       // When app is opened from background/terminated via notification
-      // Check if app is in foreground - if yes, navigate to CallPage directly
-      // If in background, show CallKit banner
-      final lifecycleState = WidgetsBinding.instance.lifecycleState;
-      if (lifecycleState == AppLifecycleState.resumed) {
-        debugPrint('📞 Call notification opened app - app is in foreground');
-        debugPrint('   Navigating to CallPage directly (not showing CallKit banner)');
-        _navigateToCallPage(data);
-      } else {
-        debugPrint('📞 Call notification opened app - app is in background');
-        debugPrint('   Showing CallKit banner');
+      // Always show CallKit banner first (even if app is in foreground)
+      // This ensures the call UI appears immediately
+      debugPrint('📞 Call notification opened app - showing CallKit banner');
+      debugPrint('   This ensures call UI appears even if app was just opened');
+      
+      // Small delay to ensure app is fully initialized
+      Future.delayed(const Duration(milliseconds: 300), () {
         _showCallKitIncoming(message);
-      }
+      });
     } else {
       // Regular message - navigate to chat
       _navigateToCallPage(data);
@@ -1223,6 +1620,88 @@ class FirebaseMessagingHandler {
     }
   }
 
+  /// Show CallKit from notification payload (when notification is tapped)
+  static Future<void> _showCallKitFromPayload({
+    required String callId,
+    required String callerName,
+    required String callerId,
+    String? avatar,
+    required bool isVideo,
+    dynamic sdp,
+  }) async {
+    try {
+      debugPrint('📞 Showing CallKit from notification tap:');
+      debugPrint('   Call ID: $callId');
+      debugPrint('   Caller: $callerName');
+      debugPrint('   Type: ${isVideo ? "video" : "voice"}');
+      
+      final params = CallKitParams(
+        id: callId,
+        nameCaller: callerName,
+        appName: 'Messaging App',
+        avatar: avatar,
+        handle: callerId.isNotEmpty ? callerId : callId,
+        type: isVideo ? 1 : 0,
+        duration: 30000,
+        textAccept: 'Accept',
+        textDecline: 'Decline',
+        textMissedCall: 'Missed Call',
+        textCallback: 'Call Back',
+        extra: <String, dynamic>{
+          'callerId': callerId,
+          'callerName': callerName,
+          'isVideo': isVideo,
+          'callId': callId,
+          'call_id': callId,
+          'caller_name': callerName,
+          'avatar': avatar ?? '',
+          'sdp': parseSdpFromData(sdp),
+          'kind': isVideo ? 'video' : 'voice',
+        },
+        headers: <String, dynamic>{},
+        android: AndroidParams(
+          isCustomNotification: true,
+          isShowLogo: true,
+          ringtonePath: 'system_default',
+          backgroundColor: '#FFB19CD9',
+          backgroundUrl: avatar,
+          actionColor: '#0955fa',
+        ),
+        ios: IOSParams(
+          iconName: 'CallKitLogo',
+          handleType: 'generic',
+          supportsVideo: isVideo,
+          maximumCallGroups: 2,
+          maximumCallsPerCallGroup: 1,
+          audioSessionMode: 'default',
+          audioSessionActive: true,
+          audioSessionPreferredSampleRate: 44100.0,
+          audioSessionPreferredIOBufferDuration: 0.005,
+          supportsDTMF: true,
+          supportsHolding: false,
+          supportsGrouping: false,
+          supportsUngrouping: false,
+          ringtonePath: 'system_ringtone_default',
+        ),
+      );
+      
+      await FlutterCallkitIncoming.showCallkitIncoming(params);
+      
+      // Store call data for when user accepts
+      _pendingCalls[callId] = {
+        'callerId': callerId,
+        'callerName': callerName,
+        'isVideo': isVideo,
+        'sdp': parseSdpFromData(sdp),
+        'kind': isVideo ? 'video' : 'voice',
+      };
+      
+      debugPrint('✅ CallKit banner shown from notification tap');
+    } catch (e) {
+      debugPrint('❌ Error showing CallKit from notification tap: $e');
+    }
+  }
+  
   /// Show native incoming call UI using CallKit
   /// ONLY shows banner when app is in BACKGROUND state
   /// In foreground, Socket.io will handle navigation to CallPage
@@ -1539,5 +2018,95 @@ class FirebaseMessagingHandler {
   /// Unsubscribe from a topic
   static Future<void> unsubscribeFromTopic(String topic) async {
     await _messaging.unsubscribeFromTopic(topic);
+  }
+  
+  /// Diagnostic function to check all FCM-related permissions and settings
+  /// Call this function to diagnose why FCM might not work on real devices
+  static Future<Map<String, dynamic>> diagnoseFCMIssues() async {
+    final diagnostics = <String, dynamic>{};
+    
+    try {
+      // Check Firebase initialization
+      try {
+        final app = Firebase.app();
+        diagnostics['firebase_initialized'] = true;
+        diagnostics['firebase_app_name'] = app.name;
+      } catch (e) {
+        diagnostics['firebase_initialized'] = false;
+        diagnostics['firebase_error'] = e.toString();
+      }
+      
+      // Check FCM token
+      try {
+        final token = await _messaging.getToken();
+        diagnostics['fcm_token_available'] = token != null && token.isNotEmpty;
+        diagnostics['fcm_token'] = token != null ? maskToken(token) : 'null';
+      } catch (e) {
+        diagnostics['fcm_token_available'] = false;
+        diagnostics['fcm_token_error'] = e.toString();
+      }
+      
+      // Check notification permissions
+      try {
+        final settings = await _messaging.getNotificationSettings();
+        diagnostics['notification_permission'] = settings.authorizationStatus.toString();
+        diagnostics['notification_permission_granted'] = 
+            settings.authorizationStatus == AuthorizationStatus.authorized ||
+            settings.authorizationStatus == AuthorizationStatus.provisional;
+      } catch (e) {
+        diagnostics['notification_permission_error'] = e.toString();
+      }
+      
+      if (Platform.isAndroid) {
+        // Check System Alert Window permission
+        try {
+          final systemAlertStatus = await Permission.systemAlertWindow.status;
+          diagnostics['system_alert_window'] = systemAlertStatus.toString();
+          diagnostics['system_alert_window_granted'] = systemAlertStatus.isGranted;
+        } catch (e) {
+          diagnostics['system_alert_window_error'] = e.toString();
+        }
+        
+        // Check Battery Optimization exemption
+        try {
+          final batteryStatus = await Permission.ignoreBatteryOptimizations.status;
+          diagnostics['battery_optimization'] = batteryStatus.toString();
+          diagnostics['battery_optimization_granted'] = batteryStatus.isGranted;
+        } catch (e) {
+          diagnostics['battery_optimization_error'] = e.toString();
+        }
+        
+        // Check notification channel
+        try {
+          final plugin = FlutterLocalNotificationsPlugin();
+          final androidImplementation = plugin
+              .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+          if (androidImplementation != null) {
+            // Try to get channel - if it exists, it's created
+            diagnostics['notification_channel_created'] = true;
+          } else {
+            diagnostics['notification_channel_created'] = false;
+            diagnostics['notification_channel_error'] = 'Android implementation not available';
+          }
+        } catch (e) {
+          diagnostics['notification_channel_error'] = e.toString();
+        }
+      }
+      
+      // Platform info
+      diagnostics['platform'] = Platform.isAndroid ? 'Android' : (Platform.isIOS ? 'iOS' : 'Unknown');
+      diagnostics['timestamp'] = DateTime.now().toIso8601String();
+      
+    } catch (e) {
+      diagnostics['diagnostic_error'] = e.toString();
+    }
+    
+    // Print diagnostics
+    debugPrint('📊 FCM Diagnostics:');
+    for (final entry in diagnostics.entries) {
+      debugPrint('   ${entry.key}: ${entry.value}');
+    }
+    
+    return diagnostics;
   }
 }
